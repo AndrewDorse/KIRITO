@@ -146,7 +146,7 @@ class KiritoEngine:
         try:
             resp = self.locator.session.get(
                 f"{GAMMA_URL}/markets",
-                params={"slug": slug},
+                params={"slug": slug, "closed": "true"},
                 timeout=self.config.request_timeout_seconds,
             )
             resp.raise_for_status()
@@ -163,15 +163,21 @@ class KiritoEngine:
             if value in (UP, DOWN):
                 return value
 
+        metadata = {}
+        events = market.get("events") or []
+        if events and isinstance(events, list):
+            metadata = (events[0] or {}).get("eventMetadata") or {}
         final_px = _float_or_none(
             market.get("finalPrice")
             or market.get("final_price")
             or market.get("resolutionPrice")
+            or metadata.get("finalPrice")
         )
         beat_px = _float_or_none(
             market.get("priceToBeat")
             or market.get("price_to_beat")
             or market.get("openPrice")
+            or metadata.get("priceToBeat")
         )
         if final_px is not None and beat_px is not None:
             return UP if final_px > beat_px else DOWN

@@ -50,7 +50,7 @@ def _ssl_context_secure() -> ssl.SSLContext:
             import truststore
 
             return truststore.ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        except ImportError:
+        except (ImportError, AttributeError):
             pass
 
     ca_env = os.getenv("BOT_SSL_CA_BUNDLE", "").strip()
