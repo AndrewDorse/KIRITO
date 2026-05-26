@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""KIRITO Docker entrypoint."""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+
+
+def _configure_logging() -> None:
+    """Keep HTTP/SDK quiet. App logger defaults to ERROR; trade events go to stdout."""
+    for name in (
+        "urllib3",
+        "requests",
+        "websocket",
+        "websockets",
+        "py_clob_client",
+        "py_clob_client_v2",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    app = logging.getLogger("polymarket_btc_ladder")
+    level_name = (os.getenv("BOT_LOG_LEVEL") or "ERROR").strip().upper()
+    app.setLevel(getattr(logging, level_name, logging.INFO))
+    if not app.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        app.addHandler(handler)
+    app.propagate = False
+
+    logging.getLogger().setLevel(logging.WARNING)
+
+
+def main() -> int:
+    _configure_logging()
+
+    from config import BotConfig, BotConfigError
+    from kirito_engine import KiritoEngine
+    from market_locator import GammaMarketLocator
+    from trader import PolymarketTrader, wallet_config_hint_for_error
+
+    try:
+        config = BotConfig.from_env()
+    except BotConfigError as exc:
+        print(f"Config error: {exc}", file=sys.stderr)
+        return 2
+
+    if config.strategy_mode != "kirito_early4":
+        print(
+            "KIRITO image expects BOT_STRATEGY_MODE=kirito_early4 "
+            f"(got {config.strategy_mode!r}).",
+            file=sys.stderr,
+        )
+        return 2
+
+    if config.dry_run:
+        logging.getLogger("polymarket_btc_ladder").error(
+            "POLY_DRY_RUN=true: bot will NOT place real orders. "
+            "Set POLY_DRY_RUN=false for live trading."
+        )
+
+    locator = GammaMarketLocator(config)
+    try:
+        trader = PolymarketTrader(config)
+    except Exception as exc:
+        print(f"WALLET_FAIL init: {exc}", file=sys.stderr)
+        print(wallet_config_hint_for_error(exc), file=sys.stderr)
+        return 2
+
+    if not config.dry_run:
+        ok, detail = trader.verify_clob_ready()
+        print(f"WALLET_CHECK {'OK' if ok else 'FAIL'} {detail}", flush=True)
+        if not ok:
+            print(wallet_config_hint_for_error(Exception(detail)), file=sys.stderr)
+            return 2
+
+    KiritoEngine(config, locator, trader).run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

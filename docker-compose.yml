@@ -1,0 +1,14 @@
+# KIRITO: BTC 5m early-entry 4-strike opposite strategy. Copy .env.example -> .env
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./exports:/app/exports
+      - bot_data:/app/data
+
+volumes:
+  bot_data:

@@ -1,0 +1,34 @@
+# Ignore everything by default. KIRITO repo should contain only files needed
+# to build/deploy Docker and run the live bot.
+*
+
+# Keep repo metadata/docs.
+!.gitignore
+!.gitattributes
+!README.md
+
+# Keep Docker deploy files.
+!Dockerfile
+!docker-compose.yml
+!docker-entrypoint.sh
+!requirements.txt
+!.env.example
+
+# Keep runtime bot source.
+!main.py
+!kirito_engine.py
+!config.py
+!trader.py
+!market_locator.py
+!http_session.py
+!clob_fak.py
+!polymarket_ws.py
+!check_wallet.py
+
+# Always keep secrets/runtime output out of git.
+.env
+__pycache__/
+*.pyc
+logs/
+exports/
+data/
