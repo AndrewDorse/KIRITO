@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from config import (
     GAMMA_URL,
     LOGGER,
@@ -122,6 +124,9 @@ class KiritoEngine:
         tmp.replace(self.state_path)
 
     def _fetch_recent_resolved_windows(self) -> list[dict[str, Any]]:
+        fast = self._fetch_recent_binance_windows()
+        if fast:
+            return fast
         now_ts = int(time.time())
         current_start = (now_ts // self.window_seconds) * self.window_seconds
         out: list[dict[str, Any]] = []
@@ -131,6 +136,50 @@ class KiritoEngine:
             if row is not None:
                 out.append(row)
         return sorted(out, key=lambda x: int(x["start_ts"]))
+
+    def _fetch_recent_binance_windows(self) -> list[dict[str, Any]]:
+        if self.config.kirito_symbol != "BTC" or self.config.kirito_window_minutes != 5:
+            return []
+        try:
+            response = requests.get(
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol": "BTCUSDT",
+                    "interval": "5m",
+                    "limit": max(10, int(self.config.kirito_history_windows) + 3),
+                },
+                timeout=min(5.0, float(self.config.request_timeout_seconds)),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            LOGGER.debug("Binance recent BTC 5m fetch failed; falling back to Gamma: %s", exc)
+            return []
+
+        now_ms = int(time.time() * 1000)
+        rows: list[dict[str, Any]] = []
+        for kline in payload:
+            try:
+                start_ts = int(kline[0]) // 1000
+                close_time_ms = int(kline[6])
+                open_px = float(kline[1])
+                close_px = float(kline[4])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if close_time_ms >= now_ms:
+                continue
+            winner = UP if close_px >= open_px else DOWN
+            rows.append(
+                {
+                    "start_ts": start_ts,
+                    "slug": self._slug(start_ts),
+                    "winner": winner,
+                    "source": "binance_5m",
+                    "open": open_px,
+                    "close": close_px,
+                }
+            )
+        return sorted(rows[-int(self.config.kirito_history_windows) :], key=lambda x: int(x["start_ts"]))
 
     def _resolved_window(self, start_ts: int) -> dict[str, Any] | None:
         slug = self._slug(start_ts)
@@ -398,6 +447,7 @@ class KiritoEngine:
         key = f"{cycle_id}:{step}:{slug}:{bet_side}"
         if key in self.state["orders"]:
             return key
+        late_entry = int(time.time()) >= int(start_ts)
         contract = self.locator.get_contract_for_window_start(
             int(self.config.kirito_window_minutes),
             int(start_ts),
@@ -407,7 +457,7 @@ class KiritoEngine:
             print(f"SKIP_ORDER cycle={cycle_id} step={step} slug={slug} reason=market_not_active", flush=True)
             return None
         token = contract.up if bet_side == UP else contract.down
-        order = self._buy_token(contract, token, bet_side, stake)
+        order = self._buy_token(contract, token, bet_side, stake, late_entry=late_entry)
         if not order:
             return None
         order.update(
@@ -439,6 +489,8 @@ class KiritoEngine:
         token: TokenMarket,
         side: str,
         stake: float,
+        *,
+        late_entry: bool = False,
     ) -> dict[str, Any] | None:
         try:
             self.trader.sync_ws_subscriptions([contract])
@@ -448,7 +500,7 @@ class KiritoEngine:
         if ask is None or ask <= 0:
             print(f"SKIP_ORDER slug={contract.slug} side={side} reason=no_ask", flush=True)
             return None
-        limit_price = min(0.99, round(float(ask) + float(self.config.kirito_price_pad), 2))
+        limit_price = 0.55 if late_entry else min(0.99, round(float(ask) + float(self.config.kirito_price_pad), 2))
         shares_raw = max(float(self.config.kirito_min_shares), float(stake) / max(limit_price, 0.01))
         shares = round(shares_raw, int(self.config.kirito_share_round_dp))
         if shares <= 0:
@@ -463,6 +515,7 @@ class KiritoEngine:
                 "avg_price": limit_price,
                 "limit_price": limit_price,
                 "best_ask": float(ask),
+                "late_entry": late_entry,
             }
         result = self.trader.place_marketable_buy_with_result(
             token,
@@ -474,7 +527,8 @@ class KiritoEngine:
         if not getattr(result, "matched_any", False):
             print(
                 f"SKIP_ORDER slug={contract.slug} side={side} reason=no_fill "
-                f"status={getattr(result, 'status', '')} error={getattr(result, 'error', '')}",
+                f"status={getattr(result, 'status', '')} error={getattr(result, 'error', '')} "
+                f"limit={limit_price:.2f} best_ask={float(ask):.2f} late_entry={late_entry}",
                 flush=True,
             )
             return None
@@ -487,6 +541,7 @@ class KiritoEngine:
             "avg_price": float(getattr(result, "avg_price", 0.0)),
             "limit_price": limit_price,
             "best_ask": float(ask),
+            "late_entry": late_entry,
         }
 
     def _mark_order_role(self, key: str, role: str) -> None:
