@@ -367,9 +367,11 @@ class BotConfig:
     kirito_window_minutes: int = 5
     kirito_base_pct: float = 0.01
     kirito_base_max_usdc: float = 20.0
-    kirito_multiplier: float = 1.75
+    kirito_multiplier: float = 2.0
     kirito_price_pad: float = 0.02
     kirito_min_shares: float = 5.0
+    kirito_fak_balance_threshold: float = 250.0
+    kirito_fak_min_usdc: float = 1.0
     kirito_share_round_dp: int = 1
     kirito_poll_seconds: float = 5.0
     kirito_history_windows: int = 30
@@ -803,9 +805,13 @@ class BotConfig:
             kirito_window_minutes=max(1, _env_int("KIRITO_WINDOW_MINUTES", 5)),
             kirito_base_pct=max(0.0001, _env_float("KIRITO_BASE_PCT", 0.01)),
             kirito_base_max_usdc=max(0.01, _env_float("KIRITO_BASE_MAX_USDC", 20.0)),
-            kirito_multiplier=max(1.01, _env_float("KIRITO_MULTIPLIER", 1.75)),
+            kirito_multiplier=max(1.01, _env_float("KIRITO_MULTIPLIER", 2.0)),
             kirito_price_pad=max(0.0, min(0.25, _env_float("KIRITO_PRICE_PAD", 0.02))),
             kirito_min_shares=max(5.0, _env_float("KIRITO_MIN_SHARES", 5.0)),
+            kirito_fak_balance_threshold=max(
+                0.0, _env_float("KIRITO_FAK_BALANCE_THRESHOLD", 250.0)
+            ),
+            kirito_fak_min_usdc=max(0.01, _env_float("KIRITO_FAK_MIN_USDC", 1.0)),
             kirito_share_round_dp=max(0, min(4, _env_int("KIRITO_SHARE_ROUND_DP", 1))),
             kirito_poll_seconds=max(1.0, _env_float("KIRITO_POLL_SECONDS", 5.0)),
             kirito_history_windows=max(8, _env_int("KIRITO_HISTORY_WINDOWS", 30)),

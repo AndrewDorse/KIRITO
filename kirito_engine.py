@@ -501,6 +501,22 @@ class KiritoEngine:
             print(f"SKIP_ORDER slug={contract.slug} side={side} reason=no_ask", flush=True)
             return None
         limit_price = 0.55 if late_entry else min(0.99, round(float(ask) + float(self.config.kirito_price_pad), 2))
+        try:
+            balance = float(self.trader.wallet_balance_usdc()) if not self.config.dry_run else 0.0
+        except Exception:
+            balance = 0.0
+        small_balance_fak = (
+            balance > 0
+            and balance < float(self.config.kirito_fak_balance_threshold)
+        )
+        if small_balance_fak:
+            return self._buy_token_usdc(
+                contract,
+                token,
+                side,
+                max(float(self.config.kirito_fak_min_usdc), float(stake)),
+            )
+
         shares_raw = max(float(self.config.kirito_min_shares), float(stake) / max(limit_price, 0.01))
         shares = round(shares_raw, int(self.config.kirito_share_round_dp))
         if shares <= 0:
@@ -542,6 +558,53 @@ class KiritoEngine:
             "limit_price": limit_price,
             "best_ask": float(ask),
             "late_entry": late_entry,
+        }
+
+    def _buy_token_usdc(
+        self,
+        contract: ActiveContract,
+        token: TokenMarket,
+        side: str,
+        usdc: float,
+    ) -> dict[str, Any] | None:
+        if self.config.dry_run:
+            ask = self.trader.get_best_ask(token.token_id) or 0.52
+            limit_price = min(0.99, round(float(ask) + float(self.config.kirito_price_pad), 2))
+            shares = round(float(usdc) / max(limit_price, 0.01), 4)
+            return {
+                "order_id": f"dry-usdc-{int(time.time() * 1000)}",
+                "status": "dry_run_usdc",
+                "shares": shares,
+                "filled_shares": shares,
+                "filled_usdc": float(usdc),
+                "avg_price": limit_price,
+                "limit_price": limit_price,
+                "best_ask": float(ask),
+                "sizing_mode": "fak_usdc",
+            }
+        result = self.trader.place_market_buy_usdc_with_result(
+            token,
+            float(usdc),
+            confirm_get_order=bool(self.config.polymarket_fak_confirm_get_order),
+        )
+        if not getattr(result, "matched_any", False):
+            print(
+                f"SKIP_ORDER slug={contract.slug} side={side} reason=no_fill_usdc "
+                f"status={getattr(result, 'status', '')} error={getattr(result, 'error', '')} "
+                f"usdc={float(usdc):.2f}",
+                flush=True,
+            )
+            return None
+        return {
+            "order_id": str(getattr(result, "order_id", "")),
+            "status": str(getattr(result, "status", "")),
+            "shares": float(getattr(result, "filled_shares", 0.0)),
+            "filled_shares": float(getattr(result, "filled_shares", 0.0)),
+            "filled_usdc": float(getattr(result, "filled_usdc", 0.0)),
+            "avg_price": float(getattr(result, "avg_price", 0.0)),
+            "limit_price": float(getattr(result, "avg_price", 0.0)),
+            "best_ask": 0.0,
+            "sizing_mode": "fak_usdc",
         }
 
     def _mark_order_role(self, key: str, role: str) -> None:

@@ -26,13 +26,15 @@ KIRITO_SYMBOL=BTC
 KIRITO_WINDOW_MINUTES=5
 KIRITO_BASE_PCT=0.01
 KIRITO_BASE_MAX_USDC=20
-KIRITO_MULTIPLIER=1.75
+KIRITO_MULTIPLIER=2.0
 KIRITO_PRICE_PAD=0.02
 KIRITO_MIN_SHARES=5
+KIRITO_FAK_BALANCE_THRESHOLD=250
+KIRITO_FAK_MIN_USDC=1
 KIRITO_SHARE_ROUND_DP=1
 KIRITO_STATE_PATH=/app/data/kirito_state.json
 ```
 
-Orders are marketable FAK limit buys using `best ask + KIRITO_PRICE_PAD`, capped at `$0.99`. Shares are rounded to one decimal and never below 5 shares.
+When wallet balance is below `KIRITO_FAK_BALANCE_THRESHOLD`, orders are USDC-sized FAK buys with at least `KIRITO_FAK_MIN_USDC`. At or above the threshold, orders use marketable limit buys with `best ask + KIRITO_PRICE_PAD`, capped at `$0.99`; shares are rounded to one decimal and never below 5 shares.
 
 The bot stores cycle/order state in `KIRITO_STATE_PATH`, so restarts should not duplicate the same active setup.
