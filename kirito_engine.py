@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,9 +66,9 @@ class KiritoEngine:
             "INIT KIRITO "
             f"symbol={self.config.kirito_symbol} "
             f"window={self.config.kirito_window_minutes}m "
-            f"base=min({self.config.kirito_base_pct:.2%} balance, "
-            f"${self.config.kirito_base_max_usdc:.2f}) "
+            f"base=${self.config.kirito_base_stake_usdc:.2f} fixed "
             f"mult={self.config.kirito_multiplier:g} "
+            f"order_mode={self.config.kirito_order_mode} "
             f"dry_run={self.config.dry_run}",
             flush=True,
         )
@@ -422,16 +421,7 @@ class KiritoEngine:
         return tail
 
     def _base_stake(self) -> float:
-        balance = 0.0 if self.config.dry_run else self.trader.wallet_balance_usdc()
-        if balance <= 0:
-            balance = float(self.config.kirito_base_max_usdc)
-        return max(
-            0.01,
-            min(
-                balance * float(self.config.kirito_base_pct),
-                float(self.config.kirito_base_max_usdc),
-            ),
-        )
+        return max(0.01, float(self.config.kirito_base_stake_usdc))
 
     def _place_step_order(
         self,
@@ -509,7 +499,12 @@ class KiritoEngine:
             balance > 0
             and balance < float(self.config.kirito_fak_balance_threshold)
         )
-        if small_balance_fak:
+        force_fak_usdc = str(self.config.kirito_order_mode).strip().lower() in {
+            "fak_usdc",
+            "usdc_fak",
+            "market_usdc",
+        }
+        if force_fak_usdc or small_balance_fak:
             return self._buy_token_usdc(
                 contract,
                 token,
@@ -569,16 +564,17 @@ class KiritoEngine:
     ) -> dict[str, Any] | None:
         if self.config.dry_run:
             ask = self.trader.get_best_ask(token.token_id) or 0.52
-            limit_price = min(0.99, round(float(ask) + float(self.config.kirito_price_pad), 2))
-            shares = round(float(usdc) / max(limit_price, 0.01), 4)
+            price = min(0.99, round(float(ask) + float(self.config.kirito_price_pad), 2))
+            filled_usdc = float(usdc)
+            shares = filled_usdc / max(price, 0.01)
             return {
                 "order_id": f"dry-usdc-{int(time.time() * 1000)}",
                 "status": "dry_run_usdc",
                 "shares": shares,
                 "filled_shares": shares,
-                "filled_usdc": float(usdc),
-                "avg_price": limit_price,
-                "limit_price": limit_price,
+                "filled_usdc": filled_usdc,
+                "avg_price": price,
+                "limit_price": 0.0,
                 "best_ask": float(ask),
                 "sizing_mode": "fak_usdc",
             }
@@ -602,7 +598,7 @@ class KiritoEngine:
             "filled_shares": float(getattr(result, "filled_shares", 0.0)),
             "filled_usdc": float(getattr(result, "filled_usdc", 0.0)),
             "avg_price": float(getattr(result, "avg_price", 0.0)),
-            "limit_price": float(getattr(result, "avg_price", 0.0)),
+            "limit_price": 0.0,
             "best_ask": 0.0,
             "sizing_mode": "fak_usdc",
         }

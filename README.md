@@ -7,7 +7,9 @@ KIRITO is a Polymarket BTC 5m live bot for the selected backtest variant:
 - after each loss, promote the already-open next window and pre-arm one more;
 - after a win, keep/abandon the already-open next-window position and end the cycle.
 
-Backtest selected: `abandon_prearmed_on_win`, 3,560 trades, 51.15% WR, ending balance `$6,052.39` from `$100`, max drawdown `-$1,587.56`, max stake `$1,759.28`, no ruin in the local 90-day PM dataset.
+Current sizing: fixed dollar martingale progression `$1, $2, $4, $8, $16...` using USDC-sized FAK buys.
+
+Latest comparable backtest with `$1000` start balance, `52c` FAK fill assumption, and `abandon_prearmed_on_win`: 3,599 trades, 51.13% WR, ending balance `$2,248.08`, PnL `+$1,248.08`, max drawdown `-$228.92`, max stake `$256`, no ruin in the local PM dataset.
 
 ## Run
 
@@ -24,9 +26,9 @@ Set real wallet values in `.env`, then switch `POLY_DRY_RUN=false` for live trad
 BOT_STRATEGY_MODE=kirito_early4
 KIRITO_SYMBOL=BTC
 KIRITO_WINDOW_MINUTES=5
-KIRITO_BASE_PCT=0.01
-KIRITO_BASE_MAX_USDC=20
+KIRITO_BASE_STAKE_USDC=1
 KIRITO_MULTIPLIER=2.0
+KIRITO_ORDER_MODE=fak_usdc
 KIRITO_PRICE_PAD=0.02
 KIRITO_MIN_SHARES=5
 KIRITO_FAK_BALANCE_THRESHOLD=250
@@ -35,6 +37,8 @@ KIRITO_SHARE_ROUND_DP=1
 KIRITO_STATE_PATH=/app/data/kirito_state.json
 ```
 
-When wallet balance is below `KIRITO_FAK_BALANCE_THRESHOLD`, orders are USDC-sized FAK buys with at least `KIRITO_FAK_MIN_USDC`. At or above the threshold, orders use marketable limit buys with `best ask + KIRITO_PRICE_PAD`, capped at `$0.99`; shares are rounded to one decimal and never below 5 shares.
+With `KIRITO_ORDER_MODE=fak_usdc`, every KIRITO entry is sent as a USDC-sized FAK market buy. The first cycle order is `KIRITO_BASE_STAKE_USDC`, and each loss multiplies the next pre-armed order by `KIRITO_MULTIPLIER`.
+
+If `KIRITO_ORDER_MODE=limit_shares`, balances below `KIRITO_FAK_BALANCE_THRESHOLD` still use USDC-sized FAK buys; balances at or above the threshold use marketable limit buys with `best ask + KIRITO_PRICE_PAD`, capped at `$0.99`, shares rounded by `KIRITO_SHARE_ROUND_DP`, and never below `KIRITO_MIN_SHARES`.
 
 The bot stores cycle/order state in `KIRITO_STATE_PATH`, so restarts should not duplicate the same active setup.

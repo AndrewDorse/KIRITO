@@ -184,6 +184,14 @@ def _clob_taker_size_shares(size: float) -> float:
     return float(f"{float(q):.4f}")
 
 
+def _clob_market_buy_usdc(usdc: float) -> float:
+    """Polymarket CLOB market BUY amount is USDC maker amount — max 2 decimals."""
+    if usdc <= 0:
+        return 0.0
+    q = Decimal(str(float(usdc))).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    return float(f"{float(q):.2f}")
+
+
 def _float_field(x: Any) -> float:
     try:
         if x is None or x == "":
@@ -885,7 +893,7 @@ class PolymarketTrader:
         *,
         fee_rate_bps: int | None = None,
     ) -> dict[str, Any]:
-        u = float(usdc)
+        u = _clob_market_buy_usdc(float(usdc))
         if u <= 0:
             raise ValueError("usdc must be > 0")
         max_attempts = _BUY_RETRY_ATTEMPTS
@@ -955,9 +963,9 @@ class PolymarketTrader:
         confirm_get_order: bool = True,
         fee_rate_bps: int | None = None,
     ) -> Any:
-        from clob_fak import FakBuyResult
+        from clob_fak import FakBuyResult, fak_buy_with_confirm
 
-        u = float(usdc)
+        u = _clob_market_buy_usdc(float(usdc))
         if u <= 0:
             raise ValueError("usdc must be > 0")
         slip_raw = os.getenv("BOT_MARKET_BUY_SLIPPAGE_USD")
@@ -979,17 +987,50 @@ class PolymarketTrader:
         limit_px = min(_CLOB_BUY_MAX_PX, max(ask_r, target))
         if limit_px <= 0.0:
             raise RuntimeError("market_buy_usdc: computed_limit_non_positive")
-        # Size chosen so nominal cap at limit_px does not exceed budget (FAK fill economics still capped in clob_fak).
-        size_hint = u / limit_px
-        sz = _clob_taker_size_shares(size_hint)
-        if sz <= 0.0:
-            raise RuntimeError("market_buy_usdc: share_size_zero_after_rounding")
-        res = self._place_marketable_buy_with_result_impl(
-            token,
-            limit_px,
-            sz,
-            confirm_get_order=confirm_get_order,
-            fee_rate_bps=fee_rate_bps,
+        opts = self._market_order_options_for_token(token)
+        margs = MarketOrderArgs(
+            token_id=token.token_id,
+            amount=u,
+            side=self._buy_side,
+            price=0.0,
+            order_type=OrderType.FAK,
+        )
+        if fee_rate_bps is not None and hasattr(margs, "fee_rate_bps"):
+            margs.fee_rate_bps = fee_rate_bps
+
+        last_exc: Exception | None = None
+        refreshed_creds = False
+        raw: dict[str, Any] | None = None
+        for attempt in range(1, _BUY_RETRY_ATTEMPTS + 1):
+            try:
+                raw = self._create_and_post_market_order(margs, options=opts)
+                break
+            except Exception as exc:
+                last_exc = exc
+                if _is_order_version_mismatch_error(exc) and not refreshed_creds:
+                    try:
+                        self._refresh_api_creds()
+                        refreshed_creds = True
+                    except Exception as cred_exc:
+                        LOGGER.warning("API cred refresh failed after order_version_mismatch: %s", cred_exc)
+                self._sleep_before_buy_retry(
+                    attempt=attempt,
+                    token=token,
+                    amount_hint=u,
+                    reason=exc,
+                    context="market_buy_usdc",
+                )
+        if raw is None:
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("market buy with result failed without response")
+
+        res = fak_buy_with_confirm(
+            self.client.get_order,
+            raw,
+            requested_shares=0.0,
+            limit_price=limit_px,
+            confirm=confirm_get_order,
             requested_usdc=u,
         )
         if isinstance(res, FakBuyResult) and not res.matched_any:
