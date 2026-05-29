@@ -6,6 +6,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+from dataclasses import replace
+from pathlib import Path
 
 
 def _configure_logging() -> None:
@@ -36,7 +39,7 @@ def main() -> int:
     _configure_logging()
 
     from config import BotConfig, BotConfigError
-    from kirito_engine import KiritoEngine
+    from kirito_engine import KiritoEngine, STRATEGY_NO_PREARM_15M, STRATEGY_PREARMED_5M
     from market_locator import GammaMarketLocator
     from trader import PolymarketTrader, wallet_config_hint_for_error
 
@@ -75,7 +78,40 @@ def main() -> int:
             print(wallet_config_hint_for_error(Exception(detail)), file=sys.stderr)
             return 2
 
-    KiritoEngine(config, locator, trader).run()
+    base_state = Path(config.kirito_state_path)
+    engine_specs = [
+        (
+            "kirito-5m",
+            replace(
+                config,
+                kirito_window_minutes=5,
+                kirito_state_path=str(base_state.with_name("kirito_5m_state.json")),
+            ),
+            STRATEGY_PREARMED_5M,
+        ),
+        (
+            "kirito-15m",
+            replace(
+                config,
+                kirito_window_minutes=15,
+                kirito_state_path=str(base_state.with_name("kirito_15m_state.json")),
+            ),
+            STRATEGY_NO_PREARM_15M,
+        ),
+    ]
+    threads: list[threading.Thread] = []
+    for name, engine_config, strategy_kind in engine_specs:
+        engine = KiritoEngine(
+            engine_config,
+            GammaMarketLocator(engine_config),
+            trader,
+            strategy_kind=strategy_kind,
+        )
+        thread = threading.Thread(target=engine.run, name=name, daemon=False)
+        thread.start()
+        threads.append(thread)
+    for thread in threads:
+        thread.join()
     return 0
 
 

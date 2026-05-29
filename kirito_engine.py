@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""KIRITO early-entry 4-strike opposite strategy."""
+"""KIRITO BTC 5m and 15m opposite-strike strategies."""
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,8 @@ from trader import PolymarketTrader
 
 UP = "UP"
 DOWN = "DOWN"
+STRATEGY_PREARMED_5M = "prearmed_5m"
+STRATEGY_NO_PREARM_15M = "no_prearm_15m"
 
 
 def _opposite(side: str) -> str:
@@ -46,17 +49,21 @@ def _float_or_none(value: Any) -> float | None:
 
 
 class KiritoEngine:
-    """Pre-armed early-entry 4-strike opposite strategy."""
+    """Runs one KIRITO strategy instance with independent state."""
 
     def __init__(
         self,
         config: BotConfig,
         locator: GammaMarketLocator,
         trader: PolymarketTrader,
+        *,
+        strategy_kind: str = STRATEGY_NO_PREARM_15M,
     ) -> None:
         self.config = config
         self.locator = locator
         self.trader = trader
+        self.strategy_kind = strategy_kind
+        self.state_version = f"{strategy_kind}_v1"
         self.window_seconds = int(config.kirito_window_minutes) * 60
         self.state_path = Path(config.kirito_state_path)
         self.state: dict[str, Any] = self._load_state()
@@ -64,6 +71,7 @@ class KiritoEngine:
     def run(self) -> None:
         print(
             "INIT KIRITO "
+            f"strategy={self.strategy_kind} "
             f"symbol={self.config.kirito_symbol} "
             f"window={self.config.kirito_window_minutes}m "
             f"base=${self.config.kirito_base_stake_usdc:.2f} fixed "
@@ -85,7 +93,8 @@ class KiritoEngine:
     def tick(self) -> None:
         resolved = self._fetch_recent_resolved_windows()
         resolved_by_start = {int(row["start_ts"]): row for row in resolved}
-        self._process_pending_setup(resolved_by_start)
+        if self.strategy_kind == STRATEGY_PREARMED_5M:
+            self._process_pending_setup(resolved_by_start)
         self._process_active_cycle(resolved_by_start)
         self._maybe_start_cycle(resolved)
         self._save_state()
@@ -96,6 +105,14 @@ class KiritoEngine:
         try:
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
+                if raw.get("strategy_version") != self.state_version:
+                    print(
+                        "RESET_STATE "
+                        f"reason=strategy_version_changed old={raw.get('strategy_version', 'unknown')} "
+                        f"new={self.state_version}",
+                        flush=True,
+                    )
+                    return self._empty_state()
                 raw.setdefault("orders", {})
                 raw.setdefault("cycle_seq", 0)
                 raw.setdefault("last_setup_start_ts", 0)
@@ -104,9 +121,9 @@ class KiritoEngine:
             LOGGER.error("KIRITO state load failed: %s", exc)
         return self._empty_state()
 
-    @staticmethod
-    def _empty_state() -> dict[str, Any]:
+    def _empty_state(self) -> dict[str, Any]:
         return {
+            "strategy_version": self.state_version,
             "cycle_seq": 0,
             "last_setup_start_ts": 0,
             "pending_setup": None,
@@ -228,7 +245,7 @@ class KiritoEngine:
             or metadata.get("priceToBeat")
         )
         if final_px is not None and beat_px is not None:
-            return UP if final_px > beat_px else DOWN
+            return UP if final_px >= beat_px else DOWN
 
         outcomes = [str(x).strip().upper() for x in parse_jsonish_list(market.get("outcomes"))]
         prices = [_float_or_none(x) for x in parse_jsonish_list(market.get("outcomePrices"))]
@@ -254,8 +271,8 @@ class KiritoEngine:
             self._mark_order_role(current_key, "orphan")
             print(
                 "ABANDON_SETUP "
-                f"cycle={pending.get('cycle_id')} fourth={fourth['slug']} "
-                f"winner={fourth['winner']} expected={setup_side}",
+                f"strategy={self.strategy_kind} cycle={pending.get('cycle_id')} "
+                f"fourth={fourth['slug']} winner={fourth['winner']} expected={setup_side}",
                 flush=True,
             )
             self.state["pending_setup"] = None
@@ -284,8 +301,8 @@ class KiritoEngine:
             active["prearmed_key"] = prearmed_key
         print(
             "CONFIRM_SETUP "
-            f"cycle={active['cycle_id']} fourth={fourth['slug']} "
-            f"prearmed={bool(prearmed_key)}",
+            f"strategy={self.strategy_kind} cycle={active['cycle_id']} "
+            f"fourth={fourth['slug']} prearmed={bool(prearmed_key)}",
             flush=True,
         )
 
@@ -311,13 +328,14 @@ class KiritoEngine:
             current_order["resolved_at"] = _utc_now_iso()
             if win:
                 prearmed_key = str(active.get("prearmed_key") or "")
-                if prearmed_key:
+                if self.strategy_kind == STRATEGY_PREARMED_5M and prearmed_key:
                     self._mark_order_role(prearmed_key, "orphan")
                 print(
                     "WIN "
-                    f"cycle={active.get('cycle_id')} step={current_order.get('step')} "
+                    f"strategy={self.strategy_kind} cycle={active.get('cycle_id')} "
+                    f"step={current_order.get('step')} "
                     f"slug={current_order.get('slug')} bet={bet_side} "
-                    f"kept_next_orphan={bool(prearmed_key)}",
+                    f"kept_next_orphan={bool(prearmed_key) if self.strategy_kind == STRATEGY_PREARMED_5M else False}",
                     flush=True,
                 )
                 self.state["active_cycle"] = None
@@ -325,62 +343,95 @@ class KiritoEngine:
 
             print(
                 "LOSS "
-                f"cycle={active.get('cycle_id')} step={current_order.get('step')} "
+                f"strategy={self.strategy_kind} cycle={active.get('cycle_id')} "
+                f"step={current_order.get('step')} "
                 f"slug={current_order.get('slug')} bet={bet_side} "
                 f"winner={resolution['winner']}",
                 flush=True,
             )
-            prearmed_key = str(active.get("prearmed_key") or "")
-            if prearmed_key and prearmed_key in self.state["orders"]:
-                self._mark_order_role(prearmed_key, "current")
-                active["current_key"] = prearmed_key
-                active["prearmed_key"] = None
-                promoted = self.state["orders"][prearmed_key]
-            else:
-                promoted = None
+            if self.strategy_kind == STRATEGY_PREARMED_5M:
+                prearmed_key = str(active.get("prearmed_key") or "")
+                if prearmed_key and prearmed_key in self.state["orders"]:
+                    self._mark_order_role(prearmed_key, "current")
+                    active["current_key"] = prearmed_key
+                    active["prearmed_key"] = None
+                    promoted = self.state["orders"][prearmed_key]
+                else:
+                    promoted = None
 
-            if not promoted:
-                next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
-                next_key = self._place_step_order(
+                if not promoted:
+                    next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
+                    next_key = self._place_step_order(
+                        cycle_id=int(active.get("cycle_id") or 0),
+                        start_ts=next_start,
+                        bet_side=bet_side,
+                        stake=float(current_order.get("stake") or 0.0)
+                        * float(self.config.kirito_multiplier),
+                        step=int(current_order.get("step") or 1) + 1,
+                        role="current",
+                    )
+                    if not next_key:
+                        print(
+                            f"STOP_CYCLE strategy={self.strategy_kind} "
+                            f"cycle={active.get('cycle_id')} reason=no_next_order",
+                            flush=True,
+                        )
+                        self.state["active_cycle"] = None
+                        return
+                    active["current_key"] = next_key
+                    promoted = self.state["orders"][next_key]
+
+                prearm_start = int(promoted.get("start_ts") or 0) + self.window_seconds
+                prearm_key = self._place_step_order(
                     cycle_id=int(active.get("cycle_id") or 0),
-                    start_ts=next_start,
-                    bet_side=bet_side,
-                    stake=float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier),
-                    step=int(current_order.get("step") or 1) + 1,
-                    role="current",
+                    start_ts=prearm_start,
+                    bet_side=str(promoted.get("bet_side") or bet_side),
+                    stake=float(promoted.get("stake") or 0.0)
+                    * float(self.config.kirito_multiplier),
+                    step=int(promoted.get("step") or 1) + 1,
+                    role="prearmed",
                 )
-                if not next_key:
-                    print(f"STOP_CYCLE cycle={active.get('cycle_id')} reason=no_next_order", flush=True)
-                    self.state["active_cycle"] = None
-                    return
-                active["current_key"] = next_key
-                promoted = self.state["orders"][next_key]
+                active["prearmed_key"] = prearm_key
+                continue
 
-            prearm_start = int(promoted.get("start_ts") or 0) + self.window_seconds
-            prearm_key = self._place_step_order(
+            next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
+            next_key = self._place_step_order(
                 cycle_id=int(active.get("cycle_id") or 0),
-                start_ts=prearm_start,
-                bet_side=str(promoted.get("bet_side") or bet_side),
-                stake=float(promoted.get("stake") or 0.0) * float(self.config.kirito_multiplier),
-                step=int(promoted.get("step") or 1) + 1,
-                role="prearmed",
+                start_ts=next_start,
+                bet_side=bet_side,
+                stake=float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier),
+                step=int(current_order.get("step") or 1) + 1,
+                role="current",
             )
-            active["prearmed_key"] = prearm_key
+            if not next_key:
+                print(
+                    f"STOP_CYCLE strategy={self.strategy_kind} "
+                    f"cycle={active.get('cycle_id')} reason=no_next_order",
+                    flush=True,
+                )
+                self.state["active_cycle"] = None
+                return
+            active["current_key"] = next_key
 
     def _maybe_start_cycle(self, resolved: list[dict[str, Any]]) -> None:
-        if self.state.get("pending_setup") or self.state.get("active_cycle"):
+        if self.state.get("active_cycle") or (
+            self.strategy_kind == STRATEGY_PREARMED_5M and self.state.get("pending_setup")
+        ):
             return
-        last3 = self._last_three_consecutive(resolved)
-        if not last3:
+        signal_len = 3 if self.strategy_kind == STRATEGY_PREARMED_5M else 2
+        signal = self._last_consecutive(resolved, signal_len)
+        if not signal:
             return
-        side = str(last3[0]["winner"])
-        if any(str(row["winner"]) != side for row in last3):
+        side = str(signal[0]["winner"])
+        if any(str(row["winner"]) != side for row in signal):
             return
-        setup_end = int(last3[-1]["start_ts"])
+        setup_end = int(signal[-1]["start_ts"])
         if int(self.state.get("last_setup_start_ts") or 0) == setup_end:
             return
 
-        target_start = setup_end + 2 * self.window_seconds
+        target_start = setup_end + (
+            2 * self.window_seconds if self.strategy_kind == STRATEGY_PREARMED_5M else self.window_seconds
+        )
         cycle_id = int(self.state.get("cycle_seq") or 0) + 1
         stake = self._base_stake()
         current_key = self._place_step_order(
@@ -395,29 +446,37 @@ class KiritoEngine:
             return
         self.state["cycle_seq"] = cycle_id
         self.state["last_setup_start_ts"] = setup_end
-        self.state["pending_setup"] = {
-            "cycle_id": cycle_id,
-            "setup_side": side,
-            "fourth_start_ts": setup_end + self.window_seconds,
-            "current_key": current_key,
-            "created_at": _utc_now_iso(),
-        }
+        if self.strategy_kind == STRATEGY_PREARMED_5M:
+            self.state["pending_setup"] = {
+                "cycle_id": cycle_id,
+                "setup_side": side,
+                "fourth_start_ts": setup_end + self.window_seconds,
+                "current_key": current_key,
+                "created_at": _utc_now_iso(),
+            }
+        else:
+            self.state["active_cycle"] = {
+                "cycle_id": cycle_id,
+                "setup_side": side,
+                "current_key": current_key,
+                "created_at": _utc_now_iso(),
+            }
         print(
             "START_SETUP "
-            f"cycle={cycle_id} side={side} bet={_opposite(side)} "
+            f"strategy={self.strategy_kind} cycle={cycle_id} "
+            f"signal_len={signal_len} side={side} bet={_opposite(side)} "
             f"target={self._slug(target_start)} stake=${stake:.2f}",
             flush=True,
         )
 
-    def _last_three_consecutive(self, resolved: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-        if len(resolved) < 3:
+    def _last_consecutive(self, resolved: list[dict[str, Any]], count: int) -> list[dict[str, Any]] | None:
+        if len(resolved) < count:
             return None
-        tail = resolved[-3:]
+        tail = resolved[-count:]
         starts = [int(row["start_ts"]) for row in tail]
-        if starts[1] - starts[0] != self.window_seconds:
-            return None
-        if starts[2] - starts[1] != self.window_seconds:
-            return None
+        for left, right in zip(starts, starts[1:]):
+            if right - left != self.window_seconds:
+                return None
         return tail
 
     def _base_stake(self) -> float:
@@ -466,7 +525,7 @@ class KiritoEngine:
         self.state["orders"][key] = order
         print(
             "ORDER "
-            f"cycle={cycle_id} step={step} role={role} slug={slug} "
+            f"strategy={self.strategy_kind} cycle={cycle_id} step={step} role={role} slug={slug} "
             f"side={bet_side} stake=${stake:.2f} shares={order.get('shares')} "
             f"limit={order.get('limit_price')}",
             flush=True,

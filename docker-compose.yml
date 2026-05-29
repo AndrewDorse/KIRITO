@@ -1,4 +1,4 @@
-# KIRITO: BTC 5m early-entry 4-strike opposite strategy. Copy .env.example -> .env
+# KIRITO: BTC 5m + 15m opposite strategies. Copy .env.example -> .env
 services:
   bot:
     build: .

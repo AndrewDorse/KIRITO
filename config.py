@@ -362,9 +362,9 @@ class BotConfig:
     limit_pair_exit_sell_price: float = 0.01
     limit_pair_cleanup_poll_sec: float = 1.0
     limit_pair_cleanup_sell_max_rounds: int = 8
-    # KIRITO: early-entry 4-strike opposite, pre-armed martingale.
+    # KIRITO: BTC 15m 2-strike opposite, no pre-armed orders.
     kirito_symbol: str = "BTC"
-    kirito_window_minutes: int = 5
+    kirito_window_minutes: int = 15
     kirito_base_stake_usdc: float = 1.0
     kirito_base_pct: float = 0.01
     kirito_base_max_usdc: float = 20.0
@@ -804,7 +804,7 @@ class BotConfig:
                 os.getenv("KIRITO_SYMBOL", os.getenv("BOT_MARKET_SYMBOL", "BTC")).strip().upper()
                 or "BTC"
             ),
-            kirito_window_minutes=max(1, _env_int("KIRITO_WINDOW_MINUTES", 5)),
+            kirito_window_minutes=max(1, _env_int("KIRITO_WINDOW_MINUTES", 15)),
             kirito_base_stake_usdc=max(0.01, _env_float("KIRITO_BASE_STAKE_USDC", 1.0)),
             kirito_base_pct=max(0.0001, _env_float("KIRITO_BASE_PCT", 0.01)),
             kirito_base_max_usdc=max(0.01, _env_float("KIRITO_BASE_MAX_USDC", 20.0)),
@@ -870,9 +870,10 @@ class BotConfig:
                     "POLY_SIGNATURE_TYPE must be 0-3 "
                     f"(got {cfg.signature_type})."
                 )
-            if cfg.kirito_window_minutes != 5:
+            if cfg.kirito_window_minutes not in (5, 15):
                 raise BotConfigError(
-                    "KIRITO_WINDOW_MINUTES must be 5 for this backtested strategy."
+                    "KIRITO_WINDOW_MINUTES must be 5 or 15. "
+                    "The Docker entrypoint runs both windows regardless."
                 )
             if cfg.kirito_symbol != "BTC":
                 raise BotConfigError(

@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
-ARG KIRITO_IMAGE_TAG=2026-05-26-early4
-LABEL org.opencontainers.image.title="KIRITO early4" \
-      org.opencontainers.image.description="Docker: BTC 5m early-entry 4-strike opposite strategy" \
+ARG KIRITO_IMAGE_TAG=2026-05-29-dual-5m-15m
+LABEL org.opencontainers.image.title="KIRITO BTC 5m+15m" \
+      org.opencontainers.image.description="Docker: BTC 5m and 15m opposite strategies" \
       org.opencontainers.image.version="${KIRITO_IMAGE_TAG}"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
