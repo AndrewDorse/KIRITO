@@ -154,22 +154,23 @@ class KiritoEngine:
         return sorted(out, key=lambda x: int(x["start_ts"]))
 
     def _fetch_recent_binance_windows(self) -> list[dict[str, Any]]:
-        if self.config.kirito_symbol != "BTC" or self.config.kirito_window_minutes != 5:
+        if self.config.kirito_symbol != "BTC" or self.config.kirito_window_minutes not in (5, 15):
             return []
+        interval = f"{int(self.config.kirito_window_minutes)}m"
         try:
             response = requests.get(
                 "https://api.binance.com/api/v3/klines",
                 params={
                     "symbol": "BTCUSDT",
-                    "interval": "5m",
-                    "limit": max(10, int(self.config.kirito_history_windows) + 3),
+                    "interval": interval,
+                    "limit": max(60, int(self.config.kirito_history_windows) + 55),
                 },
                 timeout=min(5.0, float(self.config.request_timeout_seconds)),
             )
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
-            LOGGER.debug("Binance recent BTC 5m fetch failed; falling back to Gamma: %s", exc)
+            LOGGER.debug("Binance recent BTC %s fetch failed; falling back to Gamma: %s", interval, exc)
             return []
 
         now_ms = int(time.time() * 1000)
@@ -179,23 +180,103 @@ class KiritoEngine:
                 start_ts = int(kline[0]) // 1000
                 close_time_ms = int(kline[6])
                 open_px = float(kline[1])
+                high_px = float(kline[2])
+                low_px = float(kline[3])
                 close_px = float(kline[4])
+                volume = float(kline[5])
             except (TypeError, ValueError, IndexError):
                 continue
             if close_time_ms >= now_ms:
                 continue
             winner = UP if close_px >= open_px else DOWN
+            candle_range = max(0.0, high_px - low_px)
+            upper_wick = max(0.0, high_px - max(open_px, close_px))
+            lower_wick = max(0.0, min(open_px, close_px) - low_px)
             rows.append(
                 {
                     "start_ts": start_ts,
                     "slug": self._slug(start_ts),
                     "winner": winner,
-                    "source": "binance_5m",
+                    "source": f"binance_{interval}",
                     "open": open_px,
+                    "high": high_px,
+                    "low": low_px,
                     "close": close_px,
+                    "volume": volume,
+                    "body": abs(close_px - open_px),
+                    "range": candle_range,
+                    "upper_wick": upper_wick,
+                    "lower_wick": lower_wick,
+                    "wick": max(upper_wick, lower_wick),
+                    "close_pos": (close_px - low_px) / candle_range if candle_range > 0 else 0.5,
                 }
             )
-        return sorted(rows[-int(self.config.kirito_history_windows) :], key=lambda x: int(x["start_ts"]))
+        keep = max(int(self.config.kirito_history_windows), 55)
+        return sorted(rows[-keep:], key=lambda x: int(x["start_ts"]))
+
+    def _extra_boost_signal(self, resolved: dict[int, dict[str, Any]], start_ts: int) -> tuple[bool, str]:
+        row = resolved.get(int(start_ts))
+        if not row:
+            return False, "missing_previous"
+        if self.strategy_kind == STRATEGY_PREARMED_5M:
+            return self._extra_boost_5m(row, resolved)
+        if self.strategy_kind == STRATEGY_NO_PREARM_15M:
+            return self._extra_boost_15m(row, resolved)
+        return False, "unknown_strategy"
+
+    def _extra_boost_5m(self, row: dict[str, Any], resolved: dict[int, dict[str, Any]]) -> tuple[bool, str]:
+        median_wick = self._feature_baseline(resolved, int(row["start_ts"]), "wick", 20, "median")
+        wick = _float_or_none(row.get("wick"))
+        close_pos = _float_or_none(row.get("close_pos"))
+        if median_wick is None or wick is None or close_pos is None:
+            return False, "5m_missing_feature"
+        close_extreme = close_pos <= 0.2 or close_pos >= 0.8
+        ok = wick >= 1.25 * median_wick and close_extreme
+        return ok, f"5m_wick={wick:.2f}_median20={median_wick:.2f}_close_pos={close_pos:.3f}"
+
+    def _extra_boost_15m(self, row: dict[str, Any], resolved: dict[int, dict[str, Any]]) -> tuple[bool, str]:
+        mean_lower_wick = self._feature_baseline(resolved, int(row["start_ts"]), "lower_wick", 50, "mean")
+        lower_wick = _float_or_none(row.get("lower_wick"))
+        if mean_lower_wick is None or lower_wick is None:
+            return False, "15m_missing_feature"
+        ok = lower_wick >= 2.0 * mean_lower_wick
+        return ok, f"15m_lower_wick={lower_wick:.2f}_mean50={mean_lower_wick:.2f}"
+
+    def _feature_baseline(
+        self,
+        resolved: dict[int, dict[str, Any]],
+        start_ts: int,
+        feature: str,
+        lookback: int,
+        stat: str,
+    ) -> float | None:
+        vals: list[float] = []
+        for i in range(lookback, 0, -1):
+            prev = resolved.get(int(start_ts) - i * self.window_seconds)
+            value = _float_or_none((prev or {}).get(feature))
+            if value is not None:
+                vals.append(value)
+        if len(vals) < max(5, lookback // 2):
+            return None
+        if stat == "median":
+            ordered = sorted(vals)
+            mid = len(ordered) // 2
+            if len(ordered) % 2:
+                return ordered[mid]
+            return (ordered[mid - 1] + ordered[mid]) / 2.0
+        return sum(vals) / len(vals)
+
+    def _boosted_next_stake(
+        self,
+        base_stake: float,
+        prev_start_ts: int,
+        resolved_by_start: dict[int, dict[str, Any]],
+    ) -> tuple[float, bool, str]:
+        stake = float(base_stake)
+        ok, reason = self._extra_boost_signal(resolved_by_start, int(prev_start_ts))
+        if ok:
+            return stake * 2.0, True, reason
+        return stake, False, reason
 
     def _resolved_window(self, start_ts: int) -> dict[str, Any] | None:
         slug = self._slug(start_ts)
@@ -289,6 +370,11 @@ class KiritoEngine:
         current_order = self.state["orders"].get(current_key) or {}
         next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
         next_stake = float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier)
+        next_stake, boosted, boost_reason = self._boosted_next_stake(
+            next_stake,
+            int(pending.get("fourth_start_ts") or 0),
+            resolved_by_start,
+        )
         prearmed_key = self._place_step_order(
             cycle_id=active["cycle_id"],
             start_ts=next_start,
@@ -296,6 +382,8 @@ class KiritoEngine:
             stake=next_stake,
             step=int(current_order.get("step") or 1) + 1,
             role="prearmed",
+            boosted=boosted,
+            boost_reason=boost_reason,
         )
         if prearmed_key:
             active["prearmed_key"] = prearmed_key
@@ -361,14 +449,24 @@ class KiritoEngine:
 
                 if not promoted:
                     next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
+                    next_stake = (
+                        float(current_order.get("stake") or 0.0)
+                        * float(self.config.kirito_multiplier)
+                    )
+                    next_stake, boosted, boost_reason = self._boosted_next_stake(
+                        next_stake,
+                        int(current_order.get("start_ts") or 0),
+                        resolved_by_start,
+                    )
                     next_key = self._place_step_order(
                         cycle_id=int(active.get("cycle_id") or 0),
                         start_ts=next_start,
                         bet_side=bet_side,
-                        stake=float(current_order.get("stake") or 0.0)
-                        * float(self.config.kirito_multiplier),
+                        stake=next_stake,
                         step=int(current_order.get("step") or 1) + 1,
                         role="current",
+                        boosted=boosted,
+                        boost_reason=boost_reason,
                     )
                     if not next_key:
                         print(
@@ -382,26 +480,44 @@ class KiritoEngine:
                     promoted = self.state["orders"][next_key]
 
                 prearm_start = int(promoted.get("start_ts") or 0) + self.window_seconds
+                prearm_stake = (
+                    float(promoted.get("stake") or 0.0)
+                    * float(self.config.kirito_multiplier)
+                )
+                prearm_stake, boosted, boost_reason = self._boosted_next_stake(
+                    prearm_stake,
+                    int(promoted.get("start_ts") or 0),
+                    resolved_by_start,
+                )
                 prearm_key = self._place_step_order(
                     cycle_id=int(active.get("cycle_id") or 0),
                     start_ts=prearm_start,
                     bet_side=str(promoted.get("bet_side") or bet_side),
-                    stake=float(promoted.get("stake") or 0.0)
-                    * float(self.config.kirito_multiplier),
+                    stake=prearm_stake,
                     step=int(promoted.get("step") or 1) + 1,
                     role="prearmed",
+                    boosted=boosted,
+                    boost_reason=boost_reason,
                 )
                 active["prearmed_key"] = prearm_key
                 continue
 
             next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
+            next_stake = float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier)
+            next_stake, boosted, boost_reason = self._boosted_next_stake(
+                next_stake,
+                int(current_order.get("start_ts") or 0),
+                resolved_by_start,
+            )
             next_key = self._place_step_order(
                 cycle_id=int(active.get("cycle_id") or 0),
                 start_ts=next_start,
                 bet_side=bet_side,
-                stake=float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier),
+                stake=next_stake,
                 step=int(current_order.get("step") or 1) + 1,
                 role="current",
+                boosted=boosted,
+                boost_reason=boost_reason,
             )
             if not next_key:
                 print(
@@ -491,6 +607,8 @@ class KiritoEngine:
         stake: float,
         step: int,
         role: str,
+        boosted: bool = False,
+        boost_reason: str = "",
     ) -> str | None:
         slug = self._slug(start_ts)
         key = f"{cycle_id}:{step}:{slug}:{bet_side}"
@@ -518,6 +636,8 @@ class KiritoEngine:
                 "slug": slug,
                 "bet_side": bet_side,
                 "stake": float(stake),
+                "boosted": bool(boosted),
+                "boost_reason": str(boost_reason or ""),
                 "created_at": _utc_now_iso(),
                 "resolved": False,
             }
@@ -527,7 +647,8 @@ class KiritoEngine:
             "ORDER "
             f"strategy={self.strategy_kind} cycle={cycle_id} step={step} role={role} slug={slug} "
             f"side={bet_side} stake=${stake:.2f} shares={order.get('shares')} "
-            f"limit={order.get('limit_price')}",
+            f"limit={order.get('limit_price')} boosted={bool(boosted)} "
+            f"boost_reason={boost_reason}",
             flush=True,
         )
         return key

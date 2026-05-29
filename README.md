@@ -7,6 +7,13 @@ KIRITO runs two Polymarket BTC live strategies in the same Docker process:
 
 Current sizing: fixed dollar martingale progression `$1, $2, $4, $8, $16...` using USDC-sized FAK buys.
 
+Extra in-cycle boost rules are enabled:
+
+- BTC 5m: when placing a new in-cycle/prearmed step, double that step again if the latest resolved candle has `wick >= 1.25x median(wick last20)` and closes near the high/low extreme.
+- BTC 15m: when the previous 15m step loses, double the next step again if that previous candle has `lower_wick >= 2.0x mean(lower_wick last50)`.
+
+Both rules use recent closed Binance BTCUSDT candles for fast candle features. If Binance is unavailable, the bot falls back to Gamma/PM resolution and simply skips the extra boost because wick history is missing.
+
 Selected BTC 15m Chainlink/PM-resolution backtest with `$1000` start balance, `52c` FAK fill assumption, and `2_same_cancel`: 3,293 trades, 52.23% WR, ending balance `$1,735.23`, PnL `+$735.23`, max drawdown `-$256.31`, max stake `$256`, no ruin in the local PM dataset.
 
 ## Run
