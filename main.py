@@ -35,6 +35,25 @@ def _configure_logging() -> None:
     logging.getLogger().setLevel(logging.WARNING)
 
 
+def _enabled_kirito_windows() -> set[int]:
+    raw = (os.getenv("KIRITO_ENABLED_WINDOWS") or "5").strip()
+    enabled: set[int] = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            window = int(part, 10)
+        except ValueError:
+            print(f"Config error: invalid KIRITO_ENABLED_WINDOWS segment {part!r}", file=sys.stderr)
+            return set()
+        if window not in (5, 15):
+            print("Config error: KIRITO_ENABLED_WINDOWS supports only 5 and/or 15.", file=sys.stderr)
+            return set()
+        enabled.add(window)
+    return enabled or {5}
+
+
 def main() -> int:
     _configure_logging()
 
@@ -79,8 +98,12 @@ def main() -> int:
             return 2
 
     base_state = Path(config.kirito_state_path)
-    engine_specs = [
+    enabled_windows = _enabled_kirito_windows()
+    if not enabled_windows:
+        return 2
+    all_engine_specs = [
         (
+            5,
             "kirito-5m",
             replace(
                 config,
@@ -90,6 +113,7 @@ def main() -> int:
             STRATEGY_PREARMED_5M,
         ),
         (
+            15,
             "kirito-15m",
             replace(
                 config,
@@ -99,8 +123,14 @@ def main() -> int:
             STRATEGY_NO_PREARM_15M,
         ),
     ]
+    engine_specs = [spec for spec in all_engine_specs if spec[0] in enabled_windows]
+    print(
+        "KIRITO_ENABLED_WINDOWS "
+        f"{','.join(str(spec[0]) for spec in engine_specs)}",
+        flush=True,
+    )
     threads: list[threading.Thread] = []
-    for name, engine_config, strategy_kind in engine_specs:
+    for _window, name, engine_config, strategy_kind in engine_specs:
         engine = KiritoEngine(
             engine_config,
             GammaMarketLocator(engine_config),
