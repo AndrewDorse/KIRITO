@@ -369,6 +369,7 @@ class BotConfig:
     kirito_base_pct: float = 0.01
     kirito_base_max_usdc: float = 20.0
     kirito_multiplier: float = 2.0
+    kirito_max_cycle_steps: int = 3
     kirito_order_mode: str = "fak_usdc"
     kirito_price_pad: float = 0.02
     kirito_min_shares: float = 5.0
@@ -809,6 +810,7 @@ class BotConfig:
             kirito_base_pct=max(0.0001, _env_float("KIRITO_BASE_PCT", 0.01)),
             kirito_base_max_usdc=max(0.01, _env_float("KIRITO_BASE_MAX_USDC", 20.0)),
             kirito_multiplier=max(1.01, _env_float("KIRITO_MULTIPLIER", 2.0)),
+            kirito_max_cycle_steps=max(1, _env_int("KIRITO_MAX_CYCLE_STEPS", 3)),
             kirito_order_mode=(
                 os.getenv("KIRITO_ORDER_MODE", "fak_usdc").strip().lower() or "fak_usdc"
             ),

@@ -58,7 +58,7 @@ def main() -> int:
     _configure_logging()
 
     from config import BotConfig, BotConfigError
-    from kirito_engine import KiritoEngine, STRATEGY_NO_PREARM_15M, STRATEGY_PREARMED_5M
+    from kirito_engine import KiritoEngine, STRATEGY_NO_PREARM_15M, STRATEGY_SIGNAL_5M
     from market_locator import GammaMarketLocator
     from trader import PolymarketTrader, wallet_config_hint_for_error
 
@@ -110,7 +110,7 @@ def main() -> int:
                 kirito_window_minutes=5,
                 kirito_state_path=str(base_state.with_name("kirito_5m_state.json")),
             ),
-            STRATEGY_PREARMED_5M,
+            STRATEGY_SIGNAL_5M,
         ),
         (
             15,

@@ -28,6 +28,7 @@ UP = "UP"
 DOWN = "DOWN"
 STRATEGY_PREARMED_5M = "prearmed_5m"
 STRATEGY_NO_PREARM_15M = "no_prearm_15m"
+STRATEGY_SIGNAL_5M = "signal_5m"
 
 
 def _opposite(side: str) -> str:
@@ -76,6 +77,7 @@ class KiritoEngine:
             f"window={self.config.kirito_window_minutes}m "
             f"base=${self.config.kirito_base_stake_usdc:.2f} fixed "
             f"mult={self.config.kirito_multiplier:g} "
+            f"max_steps={self.config.kirito_max_cycle_steps} "
             f"order_mode={self.config.kirito_order_mode} "
             f"dry_run={self.config.dry_run}",
             flush=True,
@@ -93,6 +95,11 @@ class KiritoEngine:
     def tick(self) -> None:
         resolved = self._fetch_recent_resolved_windows()
         resolved_by_start = {int(row["start_ts"]): row for row in resolved}
+        if self.strategy_kind == STRATEGY_SIGNAL_5M:
+            self._process_signal_cycle(resolved_by_start)
+            self._maybe_start_signal_cycle(resolved, resolved_by_start)
+            self._save_state()
+            return
         if self.strategy_kind == STRATEGY_PREARMED_5M:
             self._process_pending_setup(resolved_by_start)
         self._process_active_cycle(resolved_by_start)
@@ -277,6 +284,170 @@ class KiritoEngine:
         if ok:
             return stake * 2.0, True, reason
         return stake, False, reason
+
+    def _signal_5m_entry(self, row: dict[str, Any], resolved: dict[int, dict[str, Any]]) -> tuple[bool, str]:
+        start_ts = int(row["start_ts"])
+        winner = str(row.get("winner") or "")
+        volume = _float_or_none(row.get("volume"))
+        close_pos = _float_or_none(row.get("close_pos"))
+        wick = _float_or_none(row.get("wick"))
+        reasons: list[str] = []
+
+        median_volume = self._feature_baseline(resolved, start_ts, "volume", 50, "median")
+        if (
+            volume is not None
+            and median_volume is not None
+            and close_pos is not None
+            and volume >= 3.0 * median_volume
+            and close_pos <= 0.2
+        ):
+            reasons.append(
+                f"volume3_low volume={volume:.4f} median50={median_volume:.4f} close_pos={close_pos:.3f}"
+            )
+
+        same6 = True
+        same_rows: list[dict[str, Any]] = []
+        for i in range(5, -1, -1):
+            prev = resolved.get(start_ts - i * self.window_seconds)
+            if not prev:
+                same6 = False
+                break
+            same_rows.append(prev)
+        if same6 and winner in (UP, DOWN) and all(str(prev.get("winner")) == winner for prev in same_rows):
+            reasons.append(f"same6 side={winner}")
+
+        median_wick = self._feature_baseline(resolved, start_ts, "wick", 20, "median")
+        if (
+            wick is not None
+            and median_wick is not None
+            and close_pos is not None
+            and wick >= 2.5 * median_wick
+            and close_pos >= 0.8
+        ):
+            reasons.append(
+                f"wick25_high wick={wick:.2f} median20={median_wick:.2f} close_pos={close_pos:.3f}"
+            )
+
+        return bool(reasons), ";".join(reasons) if reasons else "no_signal"
+
+    def _process_signal_cycle(self, resolved_by_start: dict[int, dict[str, Any]]) -> None:
+        while True:
+            active = self.state.get("active_cycle")
+            if not isinstance(active, dict):
+                return
+            current_key = str(active.get("current_key") or "")
+            current_order = self.state["orders"].get(current_key)
+            if not isinstance(current_order, dict):
+                self.state["active_cycle"] = None
+                return
+            resolution = resolved_by_start.get(int(current_order.get("start_ts") or 0))
+            if not resolution:
+                return
+
+            bet_side = str(current_order.get("bet_side") or "")
+            win = resolution["winner"] == bet_side
+            current_order["resolved"] = True
+            current_order["resolution"] = resolution["winner"]
+            current_order["win"] = win
+            current_order["resolved_at"] = _utc_now_iso()
+            if win:
+                print(
+                    "WIN "
+                    f"strategy={self.strategy_kind} cycle={active.get('cycle_id')} "
+                    f"step={current_order.get('step')} "
+                    f"slug={current_order.get('slug')} bet={bet_side}",
+                    flush=True,
+                )
+                self.state["active_cycle"] = None
+                return
+
+            step = int(current_order.get("step") or 1)
+            print(
+                "LOSS "
+                f"strategy={self.strategy_kind} cycle={active.get('cycle_id')} "
+                f"step={step} slug={current_order.get('slug')} bet={bet_side} "
+                f"winner={resolution['winner']}",
+                flush=True,
+            )
+            if step >= int(self.config.kirito_max_cycle_steps):
+                print(
+                    f"STOP_CYCLE strategy={self.strategy_kind} "
+                    f"cycle={active.get('cycle_id')} reason=max_steps "
+                    f"max_steps={self.config.kirito_max_cycle_steps}",
+                    flush=True,
+                )
+                self.state["active_cycle"] = None
+                return
+
+            next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
+            next_stake = float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier)
+            next_key = self._place_step_order(
+                cycle_id=int(active.get("cycle_id") or 0),
+                start_ts=next_start,
+                bet_side=bet_side,
+                stake=next_stake,
+                step=step + 1,
+                role="current",
+            )
+            if not next_key:
+                print(
+                    f"STOP_CYCLE strategy={self.strategy_kind} "
+                    f"cycle={active.get('cycle_id')} reason=no_next_order",
+                    flush=True,
+                )
+                self.state["active_cycle"] = None
+                return
+            active["current_key"] = next_key
+
+    def _maybe_start_signal_cycle(
+        self,
+        resolved: list[dict[str, Any]],
+        resolved_by_start: dict[int, dict[str, Any]],
+    ) -> None:
+        if self.state.get("active_cycle") or not resolved:
+            return
+        latest = resolved[-1]
+        setup_start = int(latest["start_ts"])
+        if int(self.state.get("last_setup_start_ts") or 0) == setup_start:
+            return
+        setup_side = str(latest.get("winner") or "")
+        if setup_side not in (UP, DOWN):
+            return
+        ok, reason = self._signal_5m_entry(latest, resolved_by_start)
+        if not ok:
+            return
+
+        cycle_id = int(self.state.get("cycle_seq") or 0) + 1
+        bet_side = _opposite(setup_side)
+        target_start = setup_start + self.window_seconds
+        stake = self._base_stake()
+        current_key = self._place_step_order(
+            cycle_id=cycle_id,
+            start_ts=target_start,
+            bet_side=bet_side,
+            stake=stake,
+            step=1,
+            role="current",
+        )
+        if not current_key:
+            return
+        self.state["cycle_seq"] = cycle_id
+        self.state["last_setup_start_ts"] = setup_start
+        self.state["active_cycle"] = {
+            "cycle_id": cycle_id,
+            "setup_side": setup_side,
+            "current_key": current_key,
+            "signal_start_ts": setup_start,
+            "signal_reason": reason,
+            "created_at": _utc_now_iso(),
+        }
+        print(
+            "START_SIGNAL "
+            f"strategy={self.strategy_kind} cycle={cycle_id} "
+            f"setup={latest.get('slug')} side={setup_side} bet={bet_side} "
+            f"target={self._slug(target_start)} stake=${stake:.2f} reason={reason}",
+            flush=True,
+        )
 
     def _resolved_window(self, start_ts: int) -> dict[str, Any] | None:
         slug = self._slug(start_ts)
@@ -760,7 +931,7 @@ class KiritoEngine:
             }
         result = self.trader.place_market_buy_usdc_with_result(
             token,
-            float(usdc),
+            round(float(usdc), 2),
             confirm_get_order=bool(self.config.polymarket_fak_confirm_get_order),
         )
         if not getattr(result, "matched_any", False):

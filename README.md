@@ -1,11 +1,12 @@
 # KIRITO
 
-KIRITO runs two Polymarket BTC live strategies in the same Docker process:
+KIRITO currently runs only the BTC 5m live strategy by default:
 
-- BTC 5m: current 3-same early-entry strategy with the next window prearmed after confirmation.
-- BTC 15m: after 2 same resolved windows, buy the opposite side in window 3; no advance/prearmed orders; after a loss, buy the same bet side in the next 15m window only after the previous window resolves.
+- BTC 5m: confirmed-candle signal strategy. When the latest closed 5m candle matches the configured high-WR signal family, the bot buys the opposite side in the next 5m window and continues only after losses.
 
-Current sizing: fixed dollar martingale progression `$1, $2, $4, $8, $16...` using USDC-sized FAK buys.
+The BTC 15m engine is still in the codebase for future multi-window use, but it is disabled unless `KIRITO_ENABLED_WINDOWS=5,15` is set.
+
+Default sizing: fixed dollar progression `$1, $2, $4`, using USDC-sized FAK buys and stopping after 3 cycle orders.
 
 Extra in-cycle boost rules are enabled:
 
@@ -30,9 +31,11 @@ Set real wallet values in `.env`, then switch `POLY_DRY_RUN=false` for live trad
 ```env
 BOT_STRATEGY_MODE=kirito_early4
 KIRITO_SYMBOL=BTC
+KIRITO_ENABLED_WINDOWS=5
 KIRITO_WINDOW_MINUTES=15
 KIRITO_BASE_STAKE_USDC=1
 KIRITO_MULTIPLIER=2.0
+KIRITO_MAX_CYCLE_STEPS=3
 KIRITO_ORDER_MODE=fak_usdc
 KIRITO_PRICE_PAD=0.02
 KIRITO_MIN_SHARES=5
@@ -45,9 +48,9 @@ KIRITO_STATE_PATH=/app/data/kirito_state.json
 At runtime, `KIRITO_STATE_PATH` is used only as the base path. The process creates separate files beside it:
 
 - `/app/data/kirito_5m_state.json`
-- `/app/data/kirito_15m_state.json`
+- `/app/data/kirito_15m_state.json` if `KIRITO_ENABLED_WINDOWS` includes `15`
 
-With `KIRITO_ORDER_MODE=fak_usdc`, every KIRITO entry is sent as a USDC-sized FAK market buy. The first cycle order is `KIRITO_BASE_STAKE_USDC`, and each loss multiplies the next order by `KIRITO_MULTIPLIER`.
+With `KIRITO_ORDER_MODE=fak_usdc`, every KIRITO entry is sent as a USDC-sized FAK market buy. The first cycle order is `KIRITO_BASE_STAKE_USDC`, each loss multiplies the next order by `KIRITO_MULTIPLIER`, and `KIRITO_MAX_CYCLE_STEPS` stops the cycle after that many orders.
 
 If `KIRITO_ORDER_MODE=limit_shares`, balances below `KIRITO_FAK_BALANCE_THRESHOLD` still use USDC-sized FAK buys; balances at or above the threshold use marketable limit buys with `best ask + KIRITO_PRICE_PAD`, capped at `$0.99`, shares rounded by `KIRITO_SHARE_ROUND_DP`, and never below `KIRITO_MIN_SHARES`.
 
