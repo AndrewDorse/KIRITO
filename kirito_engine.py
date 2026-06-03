@@ -64,7 +64,8 @@ class KiritoEngine:
         self.locator = locator
         self.trader = trader
         self.strategy_kind = strategy_kind
-        self.state_version = f"{strategy_kind}_v1"
+        strategy_revision = "v2_first_diff_after_same2" if strategy_kind == STRATEGY_SIGNAL_5M else "v1"
+        self.state_version = f"{strategy_kind}_{strategy_revision}"
         self.window_seconds = int(config.kirito_window_minutes) * 60
         self.state_path = Path(config.kirito_state_path)
         self.state: dict[str, Any] = self._load_state()
@@ -97,7 +98,12 @@ class KiritoEngine:
         resolved_by_start = {int(row["start_ts"]): row for row in resolved}
         if self.strategy_kind == STRATEGY_SIGNAL_5M:
             self._process_signal_cycle(resolved_by_start)
-            self._maybe_start_signal_cycle(resolved, resolved_by_start)
+            signal_rows = self._fetch_recent_binance_windows(include_forming=True)
+            if not signal_rows:
+                signal_rows = resolved
+            signal_by_start = {int(row["start_ts"]): row for row in signal_rows}
+            self._maybe_prearm_signal_next_step(signal_by_start)
+            self._maybe_start_signal_cycle(signal_rows, signal_by_start)
             self._save_state()
             return
         if self.strategy_kind == STRATEGY_PREARMED_5M:
@@ -160,7 +166,7 @@ class KiritoEngine:
                 out.append(row)
         return sorted(out, key=lambda x: int(x["start_ts"]))
 
-    def _fetch_recent_binance_windows(self) -> list[dict[str, Any]]:
+    def _fetch_recent_binance_windows(self, *, include_forming: bool = False) -> list[dict[str, Any]]:
         if self.config.kirito_symbol != "BTC" or self.config.kirito_window_minutes not in (5, 15):
             return []
         interval = f"{int(self.config.kirito_window_minutes)}m"
@@ -193,7 +199,17 @@ class KiritoEngine:
                 volume = float(kline[5])
             except (TypeError, ValueError, IndexError):
                 continue
-            if close_time_ms >= now_ms:
+            is_forming = close_time_ms >= now_ms
+            if is_forming:
+                now_ts = now_ms // 1000
+                seconds_to_close = (start_ts + self.window_seconds) - now_ts
+                if (
+                    not include_forming
+                    or seconds_to_close < 0
+                    or seconds_to_close > int(self.config.kirito_pre_entry_seconds)
+                ):
+                    continue
+            elif close_time_ms >= now_ms:
                 continue
             winner = UP if close_px >= open_px else DOWN
             candle_range = max(0.0, high_px - low_px)
@@ -205,6 +221,7 @@ class KiritoEngine:
                     "slug": self._slug(start_ts),
                     "winner": winner,
                     "source": f"binance_{interval}",
+                    "forming": bool(is_forming),
                     "open": open_px,
                     "high": high_px,
                     "low": low_px,
@@ -288,47 +305,21 @@ class KiritoEngine:
     def _signal_5m_entry(self, row: dict[str, Any], resolved: dict[int, dict[str, Any]]) -> tuple[bool, str]:
         start_ts = int(row["start_ts"])
         winner = str(row.get("winner") or "")
-        volume = _float_or_none(row.get("volume"))
-        close_pos = _float_or_none(row.get("close_pos"))
-        wick = _float_or_none(row.get("wick"))
-        reasons: list[str] = []
-
-        median_volume = self._feature_baseline(resolved, start_ts, "volume", 50, "median")
-        if (
-            volume is not None
-            and median_volume is not None
-            and close_pos is not None
-            and volume >= 3.0 * median_volume
-            and close_pos <= 0.2
-        ):
-            reasons.append(
-                f"volume3_low volume={volume:.4f} median50={median_volume:.4f} close_pos={close_pos:.3f}"
-            )
-
-        same6 = True
-        same_rows: list[dict[str, Any]] = []
-        for i in range(5, -1, -1):
-            prev = resolved.get(start_ts - i * self.window_seconds)
-            if not prev:
-                same6 = False
-                break
-            same_rows.append(prev)
-        if same6 and winner in (UP, DOWN) and all(str(prev.get("winner")) == winner for prev in same_rows):
-            reasons.append(f"same6 side={winner}")
-
-        median_wick = self._feature_baseline(resolved, start_ts, "wick", 20, "median")
-        if (
-            wick is not None
-            and median_wick is not None
-            and close_pos is not None
-            and wick >= 2.5 * median_wick
-            and close_pos >= 0.8
-        ):
-            reasons.append(
-                f"wick25_high wick={wick:.2f} median20={median_wick:.2f} close_pos={close_pos:.3f}"
-            )
-
-        return bool(reasons), ";".join(reasons) if reasons else "no_signal"
+        if winner not in (UP, DOWN):
+            return False, "no_signal"
+        prev1 = resolved.get(start_ts - self.window_seconds)
+        prev2 = resolved.get(start_ts - 2 * self.window_seconds)
+        if not prev1 or not prev2:
+            return False, "missing_previous_two"
+        prev1_side = str(prev1.get("winner") or "")
+        prev2_side = str(prev2.get("winner") or "")
+        if prev1_side not in (UP, DOWN) or prev2_side not in (UP, DOWN):
+            return False, "bad_previous_side"
+        if prev1_side != prev2_side:
+            return False, f"previous_not_same prev1={prev1_side} prev2={prev2_side}"
+        if winner == prev1_side:
+            return False, f"not_first_diff previous={prev1_side} current={winner}"
+        return True, f"first_diff_after_same2 previous={prev1_side} signal={winner}"
 
     def _process_signal_cycle(self, resolved_by_start: dict[int, dict[str, Any]]) -> None:
         while True:
@@ -351,11 +342,15 @@ class KiritoEngine:
             current_order["win"] = win
             current_order["resolved_at"] = _utc_now_iso()
             if win:
+                prearmed_key = str(active.get("prearmed_key") or "")
+                if prearmed_key:
+                    self._mark_order_role(prearmed_key, "orphan")
                 print(
                     "WIN "
                     f"strategy={self.strategy_kind} cycle={active.get('cycle_id')} "
                     f"step={current_order.get('step')} "
-                    f"slug={current_order.get('slug')} bet={bet_side}",
+                    f"slug={current_order.get('slug')} bet={bet_side} "
+                    f"kept_next_orphan={bool(prearmed_key)}",
                     flush=True,
                 )
                 self.state["active_cycle"] = None
@@ -379,6 +374,13 @@ class KiritoEngine:
                 self.state["active_cycle"] = None
                 return
 
+            prearmed_key = str(active.get("prearmed_key") or "")
+            if prearmed_key and prearmed_key in self.state["orders"]:
+                self._mark_order_role(prearmed_key, "current")
+                active["current_key"] = prearmed_key
+                active["prearmed_key"] = None
+                continue
+
             next_start = int(current_order.get("start_ts") or 0) + self.window_seconds
             next_stake = float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier)
             next_key = self._place_step_order(
@@ -399,6 +401,48 @@ class KiritoEngine:
                 return
             active["current_key"] = next_key
 
+    def _maybe_prearm_signal_next_step(self, signal_by_start: dict[int, dict[str, Any]]) -> None:
+        active = self.state.get("active_cycle")
+        if not isinstance(active, dict) or active.get("prearmed_key"):
+            return
+        current_key = str(active.get("current_key") or "")
+        current_order = self.state["orders"].get(current_key)
+        if not isinstance(current_order, dict):
+            return
+        step = int(current_order.get("step") or 1)
+        if step >= int(self.config.kirito_max_cycle_steps):
+            return
+        current_start = int(current_order.get("start_ts") or 0)
+        forming = signal_by_start.get(current_start)
+        if not forming or not bool(forming.get("forming")):
+            return
+        now_ts = int(time.time())
+        seconds_to_close = current_start + self.window_seconds - now_ts
+        if seconds_to_close < 0 or seconds_to_close > int(self.config.kirito_pre_entry_seconds):
+            return
+        bet_side = str(current_order.get("bet_side") or "")
+        if str(forming.get("winner") or "") == bet_side:
+            return
+        next_start = current_start + self.window_seconds
+        next_stake = float(current_order.get("stake") or 0.0) * float(self.config.kirito_multiplier)
+        prearmed_key = self._place_step_order(
+            cycle_id=int(active.get("cycle_id") or 0),
+            start_ts=next_start,
+            bet_side=bet_side,
+            stake=next_stake,
+            step=step + 1,
+            role="prearmed",
+        )
+        if prearmed_key:
+            active["prearmed_key"] = prearmed_key
+            print(
+                "PREARM_NEXT "
+                f"strategy={self.strategy_kind} cycle={active.get('cycle_id')} "
+                f"current={current_order.get('slug')} next={self._slug(next_start)} "
+                f"step={step + 1} bet={bet_side} seconds_to_close={seconds_to_close}",
+                flush=True,
+            )
+
     def _maybe_start_signal_cycle(
         self,
         resolved: list[dict[str, Any]],
@@ -418,8 +462,14 @@ class KiritoEngine:
             return
 
         cycle_id = int(self.state.get("cycle_seq") or 0) + 1
-        bet_side = _opposite(setup_side)
+        bet_side = setup_side
         target_start = setup_start + self.window_seconds
+        if (
+            int(self.config.kirito_pre_entry_seconds) > 0
+            and not bool(latest.get("forming"))
+            and int(time.time()) >= target_start
+        ):
+            return
         stake = self._base_stake()
         current_key = self._place_step_order(
             cycle_id=cycle_id,
@@ -439,13 +489,15 @@ class KiritoEngine:
             "current_key": current_key,
             "signal_start_ts": setup_start,
             "signal_reason": reason,
+            "pre_entry": bool(latest.get("forming")),
             "created_at": _utc_now_iso(),
         }
         print(
             "START_SIGNAL "
             f"strategy={self.strategy_kind} cycle={cycle_id} "
             f"setup={latest.get('slug')} side={setup_side} bet={bet_side} "
-            f"target={self._slug(target_start)} stake=${stake:.2f} reason={reason}",
+            f"target={self._slug(target_start)} stake=${stake:.2f} "
+            f"pre_entry={bool(latest.get('forming'))} reason={reason}",
             flush=True,
         )
 
@@ -785,6 +837,17 @@ class KiritoEngine:
         key = f"{cycle_id}:{step}:{slug}:{bet_side}"
         if key in self.state["orders"]:
             return key
+        if (
+            self.strategy_kind == STRATEGY_SIGNAL_5M
+            and int(self.config.kirito_pre_entry_seconds) > 0
+            and int(time.time()) >= int(start_ts)
+        ):
+            print(
+                f"SKIP_ORDER strategy={self.strategy_kind} cycle={cycle_id} "
+                f"step={step} slug={slug} reason=missed_pre_entry",
+                flush=True,
+            )
+            return None
         late_entry = int(time.time()) >= int(start_ts)
         contract = self.locator.get_contract_for_window_start(
             int(self.config.kirito_window_minutes),
@@ -855,7 +918,8 @@ class KiritoEngine:
             "usdc_fak",
             "market_usdc",
         }
-        if force_fak_usdc or small_balance_fak:
+        use_limit_shares = float(stake) > float(self.config.kirito_limit_order_min_usdc)
+        if (force_fak_usdc or small_balance_fak) and not use_limit_shares:
             return self._buy_token_usdc(
                 contract,
                 token,

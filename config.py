@@ -369,9 +369,11 @@ class BotConfig:
     kirito_base_pct: float = 0.01
     kirito_base_max_usdc: float = 20.0
     kirito_multiplier: float = 2.0
-    kirito_max_cycle_steps: int = 3
+    kirito_max_cycle_steps: int = 4
     kirito_order_mode: str = "fak_usdc"
-    kirito_price_pad: float = 0.02
+    kirito_price_pad: float = 0.01
+    kirito_pre_entry_seconds: int = 20
+    kirito_limit_order_min_usdc: float = 3.0
     kirito_min_shares: float = 5.0
     kirito_fak_balance_threshold: float = 250.0
     kirito_fak_min_usdc: float = 1.0
@@ -810,11 +812,13 @@ class BotConfig:
             kirito_base_pct=max(0.0001, _env_float("KIRITO_BASE_PCT", 0.01)),
             kirito_base_max_usdc=max(0.01, _env_float("KIRITO_BASE_MAX_USDC", 20.0)),
             kirito_multiplier=max(1.01, _env_float("KIRITO_MULTIPLIER", 2.0)),
-            kirito_max_cycle_steps=max(1, _env_int("KIRITO_MAX_CYCLE_STEPS", 3)),
+            kirito_max_cycle_steps=max(1, _env_int("KIRITO_MAX_CYCLE_STEPS", 4)),
             kirito_order_mode=(
                 os.getenv("KIRITO_ORDER_MODE", "fak_usdc").strip().lower() or "fak_usdc"
             ),
-            kirito_price_pad=max(0.0, min(0.25, _env_float("KIRITO_PRICE_PAD", 0.02))),
+            kirito_price_pad=max(0.0, min(0.25, _env_float("KIRITO_PRICE_PAD", 0.01))),
+            kirito_pre_entry_seconds=max(0, _env_int("KIRITO_PRE_ENTRY_SECONDS", 20)),
+            kirito_limit_order_min_usdc=max(0.0, _env_float("KIRITO_LIMIT_ORDER_MIN_USDC", 3.0)),
             kirito_min_shares=max(5.0, _env_float("KIRITO_MIN_SHARES", 5.0)),
             kirito_fak_balance_threshold=max(
                 0.0, _env_float("KIRITO_FAK_BALANCE_THRESHOLD", 250.0)

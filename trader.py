@@ -66,8 +66,8 @@ from config import (
 _ORDER_VERSION_MISMATCH_SNIPPET = "order_version_mismatch"
 _BUY_RETRY_DELAY_SECONDS = 2.0
 _BUY_RETRY_ATTEMPTS = 3
-# FAK cap for USDC-sized buys: best ask + this (default 3¢), clamped to Polymarket max tick 0.99.
-_DEFAULT_MARKET_BUY_SLIPPAGE_USD = 0.03
+# FAK cap for USDC-sized buys: best ask + this (default 1¢), clamped to Polymarket max tick 0.99.
+_DEFAULT_MARKET_BUY_SLIPPAGE_USD = 0.01
 _CLOB_BUY_MAX_PX = 0.99
 
 
