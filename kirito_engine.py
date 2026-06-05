@@ -974,15 +974,14 @@ class KiritoEngine:
         }
         use_limit_shares = float(stake) > float(self.config.kirito_limit_order_min_usdc)
         if (force_fak_usdc or small_balance_fak) and not use_limit_shares:
-            return self._buy_token_usdc(
-                contract,
-                token,
-                side,
+            fak_usdc = round(
                 max(float(self.config.kirito_fak_min_usdc), float(stake)),
+                1,
             )
+            return self._buy_token_usdc(contract, token, side, fak_usdc)
 
         shares_raw = max(float(self.config.kirito_min_shares), float(stake) / max(limit_price, 0.01))
-        shares = round(shares_raw, int(self.config.kirito_share_round_dp))
+        shares = round(shares_raw, 1)
         if shares <= 0:
             return None
         if self.config.dry_run:
@@ -1049,7 +1048,7 @@ class KiritoEngine:
             }
         result = self.trader.place_market_buy_usdc_with_result(
             token,
-            round(float(usdc), 2),
+            round(float(usdc), 1),
             confirm_get_order=bool(self.config.polymarket_fak_confirm_get_order),
         )
         if not getattr(result, "matched_any", False):
