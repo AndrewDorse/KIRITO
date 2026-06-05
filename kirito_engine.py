@@ -79,6 +79,11 @@ class KiritoEngine:
             f"base=${self.config.kirito_base_stake_usdc:.2f} fixed "
             f"mult={self.config.kirito_multiplier:g} "
             f"max_steps={self.config.kirito_max_cycle_steps} "
+            f"cycle_win_growth={self.config.kirito_cycle_win_base_growth:g} "
+            f"cycle_win_cap=${self.config.kirito_cycle_win_base_cap_usdc:.2f} "
+            f"skip_after_loss={self.config.kirito_skip_signals_after_cycle_loss} "
+            f"skip_loss_min_streak={self.config.kirito_skip_after_loss_min_win_streak} "
+            f"reset_on_any_loss={self.config.kirito_reset_win_streak_on_any_loss} "
             f"order_mode={self.config.kirito_order_mode} "
             f"dry_run={self.config.dry_run}",
             flush=True,
@@ -129,6 +134,8 @@ class KiritoEngine:
                 raw.setdefault("orders", {})
                 raw.setdefault("cycle_seq", 0)
                 raw.setdefault("last_setup_start_ts", 0)
+                raw.setdefault("cycle_win_streak", 0)
+                raw.setdefault("skip_signal_count", 0)
                 return raw
         except Exception as exc:
             LOGGER.error("KIRITO state load failed: %s", exc)
@@ -139,6 +146,8 @@ class KiritoEngine:
             "strategy_version": self.state_version,
             "cycle_seq": 0,
             "last_setup_start_ts": 0,
+            "cycle_win_streak": 0,
+            "skip_signal_count": 0,
             "pending_setup": None,
             "active_cycle": None,
             "orders": {},
@@ -345,11 +354,14 @@ class KiritoEngine:
                 prearmed_key = str(active.get("prearmed_key") or "")
                 if prearmed_key:
                     self._mark_order_role(prearmed_key, "orphan")
+                step = int(current_order.get("step") or 1)
+                self._record_signal_cycle_result(win=True, step=step)
                 print(
                     "WIN "
                     f"strategy={self.strategy_kind} cycle={active.get('cycle_id')} "
-                    f"step={current_order.get('step')} "
+                    f"step={step} "
                     f"slug={current_order.get('slug')} bet={bet_side} "
+                    f"cycle_win_streak={self.state.get('cycle_win_streak')} "
                     f"kept_next_orphan={bool(prearmed_key)}",
                     flush=True,
                 )
@@ -365,10 +377,12 @@ class KiritoEngine:
                 flush=True,
             )
             if step >= int(self.config.kirito_max_cycle_steps):
+                self._record_signal_cycle_result(win=False, step=step)
                 print(
                     f"STOP_CYCLE strategy={self.strategy_kind} "
                     f"cycle={active.get('cycle_id')} reason=max_steps "
-                    f"max_steps={self.config.kirito_max_cycle_steps}",
+                    f"max_steps={self.config.kirito_max_cycle_steps} "
+                    f"skip_signal_count={self.state.get('skip_signal_count')}",
                     flush=True,
                 )
                 self.state["active_cycle"] = None
@@ -461,6 +475,18 @@ class KiritoEngine:
         if not ok:
             return
 
+        skip_count = int(self.state.get("skip_signal_count") or 0)
+        if skip_count > 0:
+            self.state["skip_signal_count"] = skip_count - 1
+            self.state["last_setup_start_ts"] = setup_start
+            print(
+                "SKIP_SIGNAL "
+                f"strategy={self.strategy_kind} setup={latest.get('slug')} "
+                f"reason=after_cycle_loss remaining={skip_count - 1}",
+                flush=True,
+            )
+            return
+
         cycle_id = int(self.state.get("cycle_seq") or 0) + 1
         bet_side = setup_side
         target_start = setup_start + self.window_seconds
@@ -470,7 +496,7 @@ class KiritoEngine:
             and int(time.time()) >= target_start
         ):
             return
-        stake = self._base_stake()
+        stake = self._signal_base_stake()
         current_key = self._place_step_order(
             cycle_id=cycle_id,
             start_ts=target_start,
@@ -497,6 +523,7 @@ class KiritoEngine:
             f"strategy={self.strategy_kind} cycle={cycle_id} "
             f"setup={latest.get('slug')} side={setup_side} bet={bet_side} "
             f"target={self._slug(target_start)} stake=${stake:.2f} "
+            f"cycle_win_streak={self.state.get('cycle_win_streak')} "
             f"pre_entry={bool(latest.get('forming'))} reason={reason}",
             flush=True,
         )
@@ -820,6 +847,33 @@ class KiritoEngine:
 
     def _base_stake(self) -> float:
         return max(0.01, float(self.config.kirito_base_stake_usdc))
+
+    def _signal_base_stake(self) -> float:
+        base = self._base_stake()
+        growth = max(1.0, float(self.config.kirito_cycle_win_base_growth))
+        cap = max(base, float(self.config.kirito_cycle_win_base_cap_usdc))
+        streak = max(0, int(self.state.get("cycle_win_streak") or 0))
+        return min(cap, base * (growth**streak))
+
+    def _record_signal_cycle_result(self, *, win: bool, step: int) -> None:
+        if self.strategy_kind != STRATEGY_SIGNAL_5M:
+            return
+        streak_before = max(0, int(self.state.get("cycle_win_streak") or 0))
+        if win:
+            if bool(self.config.kirito_reset_win_streak_on_any_loss) and int(step) > 1:
+                self.state["cycle_win_streak"] = 0
+                return
+            self.state["cycle_win_streak"] = max(
+                0, int(self.state.get("cycle_win_streak") or 0)
+            ) + 1
+            return
+        self.state["cycle_win_streak"] = 0
+        min_streak = int(self.config.kirito_skip_after_loss_min_win_streak)
+        self.state["skip_signal_count"] = (
+            int(self.config.kirito_skip_signals_after_cycle_loss)
+            if streak_before > min_streak
+            else 0
+        )
 
     def _place_step_order(
         self,

@@ -370,6 +370,11 @@ class BotConfig:
     kirito_base_max_usdc: float = 20.0
     kirito_multiplier: float = 2.0
     kirito_max_cycle_steps: int = 4
+    kirito_cycle_win_base_growth: float = 1.0
+    kirito_cycle_win_base_cap_usdc: float = 1.0
+    kirito_skip_signals_after_cycle_loss: int = 0
+    kirito_skip_after_loss_min_win_streak: int = 0
+    kirito_reset_win_streak_on_any_loss: bool = False
     kirito_order_mode: str = "fak_usdc"
     kirito_price_pad: float = 0.01
     kirito_pre_entry_seconds: int = 20
@@ -813,6 +818,21 @@ class BotConfig:
             kirito_base_max_usdc=max(0.01, _env_float("KIRITO_BASE_MAX_USDC", 20.0)),
             kirito_multiplier=max(1.01, _env_float("KIRITO_MULTIPLIER", 2.0)),
             kirito_max_cycle_steps=max(1, _env_int("KIRITO_MAX_CYCLE_STEPS", 4)),
+            kirito_cycle_win_base_growth=max(
+                1.0, _env_float("KIRITO_CYCLE_WIN_BASE_GROWTH", 1.0)
+            ),
+            kirito_cycle_win_base_cap_usdc=max(
+                0.01, _env_float("KIRITO_CYCLE_WIN_BASE_CAP_USDC", 1.0)
+            ),
+            kirito_skip_signals_after_cycle_loss=max(
+                0, _env_int("KIRITO_SKIP_SIGNALS_AFTER_CYCLE_LOSS", 0)
+            ),
+            kirito_skip_after_loss_min_win_streak=max(
+                0, _env_int("KIRITO_SKIP_AFTER_LOSS_MIN_WIN_STREAK", 0)
+            ),
+            kirito_reset_win_streak_on_any_loss=_env_bool(
+                "KIRITO_RESET_WIN_STREAK_ON_ANY_LOSS", False
+            ),
             kirito_order_mode=(
                 os.getenv("KIRITO_ORDER_MODE", "fak_usdc").strip().lower() or "fak_usdc"
             ),
