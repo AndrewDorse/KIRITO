@@ -7,7 +7,7 @@ import math
 import os
 import threading
 import time
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from functools import wraps
 from typing import Any
 
@@ -182,6 +182,24 @@ def _clob_taker_size_shares(size: float) -> float:
         return 0.0
     q = Decimal(str(float(size))).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
     return float(f"{float(q):.4f}")
+
+
+def _clob_marketable_buy_size(price: float, size: float) -> float:
+    """Return 1dp shares whose maker amount (price * shares) has max 2dp."""
+    if price <= 0 or size <= 0:
+        return 0.0
+    price_cents = int(
+        (Decimal(str(float(price))).quantize(Decimal("0.01")) * Decimal("100"))
+        .to_integral_value()
+    )
+    if price_cents <= 0:
+        return 0.0
+    share_tenths = int(
+        (Decimal(str(float(size))) * Decimal("10")).to_integral_value(rounding=ROUND_UP)
+    )
+    while share_tenths > 0 and (price_cents * share_tenths) % 10 != 0:
+        share_tenths += 1
+    return float((Decimal(share_tenths) / Decimal("10")).quantize(Decimal("0.1")))
 
 
 def _clob_market_buy_usdc(usdc: float) -> float:
@@ -680,6 +698,10 @@ class PolymarketTrader:
         LOGGER.debug("Balance OK: have $%.2f, need $%.2f", balance, required_usdc)
         return True
 
+    def clob_safe_buy_shares(self, price: float, size: float) -> float:
+        """Preview BUY shares that satisfy CLOB maker/taker decimal constraints."""
+        return _clob_marketable_buy_size(price, size)
+
     # ------------------------------------------------------------------
     # Order placement
     # ------------------------------------------------------------------
@@ -744,7 +766,7 @@ class PolymarketTrader:
         *,
         fee_rate_bps: int | None = None,
     ) -> dict[str, Any]:
-        sz = _clob_taker_size_shares(size)
+        sz = _clob_marketable_buy_size(price, size)
         last_exc: Exception | None = None
         refreshed_creds = False
         for attempt in range(1, _BUY_RETRY_ATTEMPTS + 1):
@@ -822,7 +844,7 @@ class PolymarketTrader:
     ) -> Any:
         from clob_fak import fak_buy_with_confirm
 
-        sz = _clob_taker_size_shares(size)
+        sz = _clob_marketable_buy_size(price, size)
         last_exc: Exception | None = None
         refreshed_creds = False
         raw: dict[str, Any] | None = None

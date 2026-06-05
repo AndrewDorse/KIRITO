@@ -981,7 +981,7 @@ class KiritoEngine:
             return self._buy_token_usdc(contract, token, side, fak_usdc)
 
         shares_raw = max(float(self.config.kirito_min_shares), float(stake) / max(limit_price, 0.01))
-        shares = round(shares_raw, 1)
+        shares = self.trader.clob_safe_buy_shares(limit_price, shares_raw)
         if shares <= 0:
             return None
         if self.config.dry_run:
